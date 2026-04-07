@@ -1,0 +1,601 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  Flame, 
+  Soup, 
+  Leaf, 
+  Beef, 
+  CheckCircle2, 
+  ChefHat, 
+  ShoppingCart,
+  Plus,
+  Minus,
+  Utensils,
+  ClipboardList,
+  BarChart3,
+  User,
+  Trash2
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc } from 'firebase/firestore';
+
+// --- FIREBASE SETUP ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- DATA ---
+const INGREDIENT_CATEGORIES = [
+  {
+    id: 'meats',
+    name: 'Meats & Seafood',
+    icon: <Beef className="w-5 h-5 text-red-500" />,
+    items: [
+      { id: 'beef', name: 'Sliced Beef (肥牛)', price: 3.00 },
+      { id: 'fishball', name: 'Fish Balls (鱼丸)', price: 2.50 },
+      { id: 'crabstick', name: 'Crab Sticks (蟹肉棒)', price: 2.00 },
+    ]
+  },
+  {
+    id: 'veggies',
+    name: 'Vegetables & Mushrooms',
+    icon: <Leaf className="w-5 h-5 text-green-500" />,
+    items: [
+      { id: 'bokchoy', name: 'Bok Choy (小白菜)', price: 1.50 },
+      { id: 'napa', name: 'Napa Cabbage (大白菜)', price: 1.50 },
+      { id: 'lotus', name: 'Lotus Root (莲藕)', price: 2.00 },
+      { id: 'potato', name: 'Potato Slices (土豆片)', price: 1.50 },
+      { id: 'enoki', name: 'Enoki Mushroom (金针菇)', price: 2.00 },
+      { id: 'woodear', name: 'Wood Ear (木耳)', price: 1.50 },
+      { id: 'tongho', name: 'Crown Daisy (茼蒿)', price: 2.00 },
+      { id: 'celtuce', name: 'Celtuce (莴笋)', price: 1.50 },
+    ]
+  },
+  {
+    id: 'noodles_tofu',
+    name: 'Noodles & Tofu',
+    icon: <Soup className="w-5 h-5 text-yellow-600" />,
+    items: [
+      { id: 'sweet_potato_noodle', name: 'Sweet Potato Noodle (宽粉)', price: 2.50 },
+      { id: 'instant_noodle', name: 'Instant Noodle (方便面)', price: 2.00 },
+      { id: 'frozen_tofu', name: 'Frozen Tofu (冻豆腐)', price: 1.50 },
+    ]
+  }
+];
+
+const SPICE_LEVELS = [
+  { id: 'non_spicy', name: 'Non-Spicy (Bone Broth)', chinese: '骨汤 (不辣)', level: 0 },
+  { id: 'mild', name: 'Mild Spicy', chinese: '微辣', level: 1 },
+  { id: 'spicy', name: 'Spicy', chinese: '辣', level: 2 },
+];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [customerName, setCustomerName] = useState('');
+  const [cart, setCart] = useState({});
+  const [spiceLevel, setSpiceLevel] = useState('mild');
+  const [customNotes, setCustomNotes] = useState('');
+  const [isSubmitted, setIsSubmitted] = useState(false);
+  const [orders, setOrders] = useState([]);
+  const [viewMode, setViewMode] = useState('customer');
+
+  // --- FIREBASE EFFECTS ---
+  // 1. Authenticate user
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error('Authentication failed:', error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Listen to Orders real-time
+  useEffect(() => {
+    if (!user) return;
+
+    const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+    
+    const unsubscribe = onSnapshot(ordersRef, 
+      (snapshot) => {
+        const fetchedOrders = [];
+        snapshot.forEach((doc) => {
+          fetchedOrders.push({ docId: doc.id, ...doc.data() });
+        });
+        
+        // Sort newest orders first in memory
+        fetchedOrders.sort((a, b) => b.timestamp - a.timestamp);
+        setOrders(fetchedOrders);
+      },
+      (error) => {
+        console.error('Error listening to orders:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- HANDLERS ---
+  const handleAddItem = (item) => {
+    setCart(prev => ({
+      ...prev,
+      [item.id]: {
+        ...item,
+        quantity: (prev[item.id]?.quantity || 0) + 1
+      }
+    }));
+  };
+
+  const handleRemoveItem = (itemId) => {
+    setCart(prev => {
+      const newCart = { ...prev };
+      if (newCart[itemId]?.quantity > 1) {
+        newCart[itemId].quantity -= 1;
+      } else {
+        delete newCart[itemId];
+      }
+      return newCart;
+    });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!customerName.trim() || Object.keys(cart).length === 0 || !user) return;
+    
+    // Save the order to Firestore
+    const newOrder = {
+      customerName,
+      items: Object.values(cart),
+      spiceLevel: SPICE_LEVELS.find(s => s.id === spiceLevel)?.name || spiceLevel,
+      customNotes,
+      time: new Date().toLocaleTimeString(),
+      timestamp: Date.now() // Used for sorting
+    };
+    
+    try {
+      const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+      await addDoc(ordersRef, newOrder);
+      setIsSubmitted(true);
+    } catch (error) {
+      console.error('Failed to submit order:', error);
+    }
+  };
+
+  const handleDeleteOrder = async (docId) => {
+    try {
+      const orderRef = doc(db, 'artifacts', appId, 'public', 'data', 'orders', docId);
+      await deleteDoc(orderRef);
+    } catch (error) {
+      console.error('Failed to delete order:', error);
+    }
+  };
+
+  const resetOrder = () => {
+    setCustomerName('');
+    setCart({});
+    setSpiceLevel('mild');
+    setCustomNotes('');
+    setIsSubmitted(false);
+  };
+
+  // --- DERIVED STATE ---
+  const cartItems = Object.values(cart);
+  const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+  const subtotal = cartItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+  const total = subtotal; // Assuming no tax/fees for simplicity here
+
+  // Chef Mode: Aggregate all ingredients across all active orders
+  const compiledIngredients = useMemo(() => {
+    const counts = {};
+    orders.forEach(order => {
+      order.items.forEach(item => {
+        if (!counts[item.id]) {
+          counts[item.id] = { name: item.name, quantity: 0 };
+        }
+        counts[item.id].quantity += item.quantity;
+      });
+    });
+    // Sort highest quantity first
+    return Object.values(counts).sort((a, b) => b.quantity - a.quantity);
+  }, [orders]);
+
+  // --- RENDER HELPERS ---
+  const renderSpiceIcons = (level) => {
+    if (level === 0) return <Soup className="w-5 h-5 text-amber-600" />;
+    return Array(level).fill(0).map((_, i) => (
+      <Flame key={i} className="w-5 h-5 text-red-500" />
+    ));
+  };
+
+  // --- VIEWS ---
+  if (viewMode === 'chef') {
+    return (
+      <div className="min-h-screen bg-gray-50 pb-10">
+        <header className="bg-gray-800 text-white shadow-md sticky top-0 z-30">
+          <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <ClipboardList className="w-8 h-8" />
+              <div>
+                <h1 className="text-2xl font-bold tracking-tight">Chef's Dashboard</h1>
+                <p className="text-gray-300 text-sm font-medium">Order Management & Prep</p>
+              </div>
+            </div>
+            <button 
+              onClick={() => setViewMode('customer')}
+              className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
+            >
+              Back to Ordering
+            </button>
+          </div>
+        </header>
+
+        <main className="max-w-6xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Left Column: Aggregated Ingredients */}
+          <div className="lg:col-span-1 space-y-4">
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
+              <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <BarChart3 className="w-5 h-5 text-blue-600" />
+                Ingredient Prep List
+              </h2>
+              {compiledIngredients.length === 0 ? (
+                <p className="text-gray-500 text-sm italic">No active orders.</p>
+              ) : (
+                <ul className="space-y-3">
+                  {compiledIngredients.map(ing => (
+                    <li key={ing.name} className="flex justify-between items-center p-2 hover:bg-gray-50 rounded-lg border-b border-gray-100 last:border-0">
+                      <span className="font-medium text-gray-700">{ing.name}</span>
+                      <span className="bg-blue-100 text-blue-800 font-bold px-3 py-1 rounded-full text-sm">
+                        {ing.quantity}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          {/* Right Column: Order List */}
+          <div className="lg:col-span-2 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                <User className="w-5 h-5 text-green-600" />
+                Recent Orders ({orders.length})
+              </h2>
+              {orders.length > 0 && (
+                <button 
+                  onClick={() => setOrders([])}
+                  className="text-red-500 hover:text-red-700 text-sm font-semibold"
+                >
+                  Clear All Orders
+                </button>
+              )}
+            </div>
+            
+            {orders.length === 0 ? (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 text-center text-gray-500">
+                Waiting for new orders...
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                {orders.map(order => (
+                  <div key={order.docId} className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
+                    <div className="flex justify-between items-start mb-4 border-b pb-4">
+                      <div>
+                        <h3 className="text-lg font-bold text-gray-800">Order for: {order.customerName}</h3>
+                        <p className="text-xs text-gray-500">{order.time}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="bg-red-100 text-red-800 text-xs font-bold px-3 py-1 rounded-full">
+                          {order.spiceLevel}
+                        </span>
+                        <button 
+                          onClick={() => handleDeleteOrder(order.docId)}
+                          className="text-gray-400 hover:text-red-600 transition-colors bg-gray-50 hover:bg-red-50 p-1.5 rounded-lg"
+                          title="Delete Order"
+                        >
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                      </div>
+                    </div>
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      {order.items.map(item => (
+                        <span key={item.id} className="bg-gray-100 text-gray-700 text-sm px-2 py-1 rounded-md border border-gray-200">
+                          {item.quantity}x {item.name.split(' (')[0]}
+                        </span>
+                      ))}
+                    </div>
+
+                    {order.customNotes && (
+                      <div className="bg-yellow-50 text-yellow-800 p-3 rounded-lg text-sm border border-yellow-200">
+                        <strong>Notes:</strong> {order.customNotes}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (isSubmitted) {
+    return (
+      <div className="min-h-screen bg-orange-50 flex items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center space-y-6">
+          <div className="flex justify-center">
+            <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center">
+              <CheckCircle2 className="w-10 h-10 text-green-600" />
+            </div>
+          </div>
+          <div>
+            <h2 className="text-2xl font-bold text-gray-800">Order Received!</h2>
+            <p className="text-gray-600 mt-2">
+              Thank you, {customerName}. Your Malatang is being prepared.
+            </p>
+          </div>
+          
+          <div className="bg-gray-50 p-4 rounded-xl text-left text-sm space-y-2 border border-gray-100">
+            <div className="flex justify-between font-semibold border-b pb-2">
+              <span>Total Items: {totalItems}</span>
+              <span>{total} pts</span>
+            </div>
+            <p className="text-gray-600"><span className="font-medium text-gray-700">Spice:</span> {SPICE_LEVELS.find(s => s.id === spiceLevel)?.name}</p>
+            {customNotes && (
+              <p className="text-gray-600"><span className="font-medium text-gray-700">Notes:</span> {customNotes}</p>
+            )}
+          </div>
+
+          <button 
+            onClick={resetOrder}
+            className="w-full bg-red-600 text-white font-semibold py-3 rounded-xl hover:bg-red-700 transition-colors shadow-md hover:shadow-lg"
+          >
+            Start New Order
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-orange-50/50 pb-20 md:pb-8">
+      {/* HEADER */}
+      <header className="bg-red-600 text-white shadow-md sticky top-0 z-30">
+        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <ChefHat className="w-8 h-8" />
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">吴氏私厨</h1>
+              <p className="text-red-100 text-sm font-medium">First-timer Malatang</p>
+            </div>
+          </div>
+          <button 
+            onClick={() => setViewMode('chef')}
+            className="bg-red-700 hover:bg-red-800 px-4 py-2 rounded-lg text-sm font-semibold shadow-sm transition-colors"
+          >
+            Chef Login
+          </button>
+        </div>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-4 py-6">
+        <form onSubmit={handleSubmit} className="flex flex-col lg:flex-row gap-6">
+          
+          {/* LEFT COLUMN - MAIN SELECTION */}
+          <div className="flex-1 space-y-8">
+            
+            {/* SECTION: Customer Info */}
+            <section className="bg-white p-6 rounded-2xl shadow-sm border border-red-100">
+              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <span className="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">1</span>
+                Who is this order for?
+              </h2>
+              <div>
+                <input 
+                  type="text" 
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  placeholder="Enter your name"
+                  className="w-full md:w-1/2 px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none transition-all"
+                  required
+                />
+              </div>
+            </section>
+
+            {/* SECTION: Broth / Spice Level */}
+            <section className="bg-white p-6 rounded-2xl shadow-sm border border-red-100">
+              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <span className="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">2</span>
+                Choose your Broth & Spice
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {SPICE_LEVELS.map((level) => (
+                  <label 
+                    key={level.id}
+                    className={`cursor-pointer border-2 rounded-xl p-4 flex flex-col items-center justify-center text-center gap-2 transition-all ${
+                      spiceLevel === level.id 
+                        ? 'border-red-500 bg-red-50 shadow-md' 
+                        : 'border-gray-200 hover:border-red-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <input 
+                      type="radio" 
+                      name="spice" 
+                      value={level.id}
+                      checked={spiceLevel === level.id}
+                      onChange={(e) => setSpiceLevel(e.target.value)}
+                      className="hidden"
+                    />
+                    <div className="flex justify-center h-6">
+                      {renderSpiceIcons(level.level)}
+                    </div>
+                    <div>
+                      <div className="font-semibold text-gray-800 text-sm">{level.name}</div>
+                      <div className="text-xs text-gray-500 mt-1">{level.chinese}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </section>
+
+            {/* SECTION: Ingredients */}
+            <section className="bg-white p-6 rounded-2xl shadow-sm border border-red-100 space-y-8">
+              <div className="flex items-center gap-2 mb-2">
+                <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                  <span className="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">3</span>
+                  Pick your Ingredients
+                </h2>
+              </div>
+              
+              {INGREDIENT_CATEGORIES.map((category) => (
+                <div key={category.id} className="space-y-4">
+                  <h3 className="text-md font-bold text-gray-700 flex items-center gap-2 pb-2 border-b">
+                    {category.icon}
+                    {category.name}
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {category.items.map((item) => {
+                      const qty = cart[item.id]?.quantity || 0;
+                      return (
+                        <div 
+                          key={item.id} 
+                          className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
+                            qty > 0 ? 'border-red-400 bg-red-50/30' : 'border-gray-200 hover:border-red-200'
+                          }`}
+                        >
+                          <div>
+                            <div className="font-medium text-gray-800 text-sm">{item.name}</div>
+                            <div className="text-xs text-gray-500">{item.price} pts</div>
+                          </div>
+                          
+                          {qty === 0 ? (
+                            <button 
+                              type="button"
+                              onClick={() => handleAddItem(item)}
+                              className="w-8 h-8 rounded-full bg-red-100 text-red-600 flex items-center justify-center hover:bg-red-200 transition-colors"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <div className="flex items-center gap-3 bg-white border border-red-200 rounded-full px-2 py-1 shadow-sm">
+                              <button 
+                                type="button"
+                                onClick={() => handleRemoveItem(item.id)}
+                                className="w-6 h-6 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center hover:bg-gray-200 transition-colors"
+                              >
+                                <Minus className="w-3 h-3" />
+                              </button>
+                              <span className="font-bold text-sm w-4 text-center">{qty}</span>
+                              <button 
+                                type="button"
+                                onClick={() => handleAddItem(item)}
+                                className="w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center hover:bg-red-600 transition-colors"
+                              >
+                                <Plus className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </section>
+
+            {/* SECTION: Custom Requests */}
+            <section className="bg-white p-6 rounded-2xl shadow-sm border border-red-100">
+               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <span className="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">4</span>
+                Extra Cravings?
+              </h2>
+              <p className="text-sm text-gray-500 mb-3">Want an ingredient not listed above? Let us know!</p>
+              <textarea 
+                value={customNotes}
+                onChange={(e) => setCustomNotes(e.target.value)}
+                placeholder="e.g. Quail eggs, Cilantro on the side..."
+                rows="3"
+                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none transition-all resize-none"
+              ></textarea>
+            </section>
+
+          </div>
+
+          {/* RIGHT COLUMN - SUMMARY / CART (Sticky on Desktop) */}
+          <div className="w-full lg:w-80">
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 lg:sticky lg:top-24 overflow-hidden flex flex-col max-h-[80vh]">
+              <div className="bg-gray-50 p-4 border-b border-gray-100 flex items-center justify-between">
+                <h3 className="font-bold text-gray-800 flex items-center gap-2">
+                  <ShoppingCart className="w-5 h-5 text-red-600" />
+                  Your Bowl
+                </h3>
+                <span className="bg-red-100 text-red-800 text-xs font-bold px-2 py-1 rounded-full">
+                  {totalItems} items
+                </span>
+              </div>
+              
+              <div className="p-4 flex-1 overflow-y-auto min-h-[150px]">
+                {totalItems === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-2 py-8">
+                    <Utensils className="w-10 h-10 opacity-20" />
+                    <p className="text-sm">Your bowl is empty</p>
+                    <p className="text-xs text-center px-4">Select some delicious ingredients to get started!</p>
+                  </div>
+                ) : (
+                  <ul className="space-y-3">
+                    {cartItems.map(item => (
+                      <li key={item.id} className="flex justify-between items-start text-sm">
+                        <div className="flex gap-2">
+                          <span className="font-semibold text-gray-800">{item.quantity}x</span>
+                          <span className="text-gray-600 line-clamp-1">{item.name.split(' (')[0]}</span>
+                        </div>
+                        <span className="text-gray-800">{item.price * item.quantity} pts</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="p-4 bg-gray-50 border-t border-gray-100 space-y-4">
+                <div className="flex justify-between items-center font-bold text-lg text-gray-800">
+                  <span>Total</span>
+                  <span>{total} pts</span>
+                </div>
+                
+                <button
+                  type="submit"
+                  disabled={totalItems === 0 || !customerName.trim()}
+                  className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-md
+                    ${(totalItems === 0 || !customerName.trim()) 
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none' 
+                      : 'bg-red-600 text-white hover:bg-red-700 hover:shadow-lg'
+                    }`}
+                >
+                  <Soup className="w-5 h-5" />
+                  Submit Order
+                </button>
+                {totalItems > 0 && !customerName.trim() && (
+                  <p className="text-xs text-red-500 text-center font-medium">Please enter your name to order</p>
+                )}
+              </div>
+            </div>
+          </div>
+
+        </form>
+      </main>
+    </div>
+  );
+}
