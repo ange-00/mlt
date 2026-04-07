@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>吴氏私厨 - First-timer Malatang</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    /* Custom scrollbar for cart and dashboard */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #e5e7eb; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #d1d5db; }
+  </style>
+</head>
+<body class="bg-orange-50/50 text-gray-800 min-h-screen pb-20 md:pb-8">
+
+  <!-- Main Application Container -->
+  <div id="app-root"></div>
+
+  <!-- Application Logic -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // --- FIREBASE SETUP ---
+    const manualFirebaseConfig = {
+      // For GitHub Pages, you would replace these with your actual config
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    const firebaseConfig = typeof __firebase_config !== 'undefined' && Object.keys(JSON.parse(__firebase_config)).length > 0 
+      ? JSON.parse(__firebase_config) 
+      : manualFirebaseConfig;
+
+    const firebaseApp = initializeApp(firebaseConfig);
+    const auth = getAuth(firebaseApp);
+    const db = getFirestore(firebaseApp);
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'wushi-sichu-app';
+
+    // --- DATA ---
+    const INGREDIENT_CATEGORIES = [
+      {
+        id: 'meats',
+        name: 'Meats & Seafood',
+        icon: '<i class="fa-solid fa-bacon w-5 h-5 text-red-500"></i>',
+        items: [
+          { id: 'beef', name: 'Sliced Beef (肥牛)', price: 3 },
+          { id: 'fishball', name: 'Fish Balls (鱼丸)', price: 2.5 },
+          { id: 'crabstick', name: 'Crab Sticks (蟹肉棒)', price: 2 },
+        ]
+      },
+      {
+        id: 'veggies',
+        name: 'Vegetables & Mushrooms',
+        icon: '<i class="fa-solid fa-leaf w-5 h-5 text-green-500"></i>',
+        items: [
+          { id: 'bokchoy', name: 'Bok Choy (小白菜)', price: 1.5 },
+          { id: 'napa', name: 'Napa Cabbage (大白菜)', price: 1.5 },
+          { id: 'lotus', name: 'Lotus Root (莲藕)', price: 2 },
+          { id: 'potato', name: 'Potato Slices (土豆片)', price: 1.5 },
+          { id: 'enoki', name: 'Enoki Mushroom (金针菇)', price: 2 },
+          { id: 'woodear', name: 'Wood Ear (木耳)', price: 1.5 },
+          { id: 'tongho', name: 'Crown Daisy (茼蒿)', price: 2 },
+          { id: 'celtuce', name: 'Celtuce (莴笋)', price: 1.5 },
+        ]
+      },
+      {
+        id: 'noodles_tofu',
+        name: 'Noodles & Tofu',
+        icon: '<i class="fa-solid fa-bowl-food w-5 h-5 text-yellow-600"></i>',
+        items: [
+          { id: 'sweet_potato_noodle', name: 'Sweet Potato Noodle (宽粉)', price: 2.5 },
+          { id: 'instant_noodle', name: 'Instant Noodle (方便面)', price: 2 },
+          { id: 'frozen_tofu', name: 'Frozen Tofu (冻豆腐)', price: 1.5 },
+        ]
+      }
+    ];
+
+    const SPICE_LEVELS = [
+      { id: 'non_spicy', name: 'Non-Spicy (Bone Broth)', chinese: '骨汤 (不辣)', level: 0 },
+      { id: 'mild', name: 'Mild Spicy', chinese: '微辣', level: 1 },
+      { id: 'spicy', name: 'Spicy', chinese: '辣', level: 2 },
+    ];
+
+    // Helper map for quick item lookups
+    const itemMap = {};
+    INGREDIENT_CATEGORIES.forEach(cat => cat.items.forEach(item => itemMap[item.id] = item));
+
+    // --- STATE ---
+    const state = {
+      user: null,
+      viewMode: 'customer', // 'customer', 'chef', 'submitted'
+      customerName: '',
+      cart: {}, // { itemId: { ...item, quantity: 1 } }
+      spiceLevel: 'mild',
+      customNotes: '',
+      orders: []
+    };
+
+    // --- ACTIONS EXPOSED TO HTML ---
+    window.app = {
+      setView: (mode) => {
+        state.viewMode = mode;
+        render();
+      },
+      setName: (name) => {
+        state.customerName = name;
+        updateCartUI(); // Update submit button status
+      },
+      setNotes: (notes) => {
+        state.customNotes = notes;
+      },
+      setSpice: (spiceId) => {
+        state.spiceLevel = spiceId;
+        renderSpiceLevels();
+      },
+      addItem: (itemId) => {
+        if (!state.cart[itemId]) {
+          state.cart[itemId] = { ...itemMap[itemId], quantity: 0 };
+        }
+        state.cart[itemId].quantity += 1;
+        updateIngredientItemUI(itemId);
+        updateCartUI();
+      },
+      removeItem: (itemId) => {
+        if (state.cart[itemId] && state.cart[itemId].quantity > 0) {
+          state.cart[itemId].quantity -= 1;
+          if (state.cart[itemId].quantity === 0) {
+            delete state.cart[itemId];
+          }
+        }
+        updateIngredientItemUI(itemId);
+        updateCartUI();
+      },
+      submitOrder: async (e) => {
+        e.preventDefault();
+        if (!state.customerName.trim() || Object.keys(state.cart).length === 0 || !state.user) return;
+        
+        const newOrder = {
+          customerName: state.customerName,
+          items: Object.values(state.cart),
+          spiceLevel: SPICE_LEVELS.find(s => s.id === state.spiceLevel)?.name || state.spiceLevel,
+          customNotes: state.customNotes,
+          time: new Date().toLocaleTimeString(),
+          timestamp: Date.now()
+        };
+
+        try {
+          const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+          await addDoc(ordersRef, newOrder);
+          
+          state.viewMode = 'submitted';
+          render();
+        } catch (error) {
+          console.error('Failed to submit order:', error);
+          alert("Error submitting order. Please try again.");
+        }
+      },
+      deleteOrder: async (docId) => {
+        try {
+          const orderRef = doc(db, 'artifacts', appId, 'public', 'data', 'orders', docId);
+          await deleteDoc(orderRef);
+        } catch (error) {
+          console.error('Failed to delete order:', error);
+        }
+      },
+      resetOrder: () => {
+        state.customerName = '';
+        state.cart = {};
+        state.spiceLevel = 'mild';
+        state.customNotes = '';
+        state.viewMode = 'customer';
+        render();
+      },
+      clearAllOrders: () => {
+        if(confirm("Are you sure you want to delete all active orders? This cannot be undone.")) {
+            state.orders.forEach(order => {
+                window.app.deleteOrder(order.docId);
+            });
+        }
+      }
+    };
+
+    // --- FIREBASE INIT & LISTENERS ---
+    async function initFirebase() {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error('Authentication failed:', error);
+      }
+
+      onAuthStateChanged(auth, (user) => {
+        state.user = user;
+        if (user) listenToOrders();
+      });
+    }
+
+    let unsubscribeOrders = null;
+    function listenToOrders() {
+      if (!state.user) return;
+      if (unsubscribeOrders) unsubscribeOrders();
+
+      const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+      unsubscribeOrders = onSnapshot(ordersRef, (snapshot) => {
+        const fetchedOrders = [];
+        snapshot.forEach((doc) => {
+          fetchedOrders.push({ docId: doc.id, ...doc.data() });
+        });
+        
+        fetchedOrders.sort((a, b) => b.timestamp - a.timestamp);
+        state.orders = fetchedOrders;
+        
+        if (state.viewMode === 'chef') {
+          renderChefView(); // Re-render chef view real-time
+        }
+      }, (error) => {
+        console.error("Error fetching orders: ", error);
+      });
+    }
+
+    // --- RENDER FUNCTIONS ---
+    function render() {
+      const root = document.getElementById('app-root');
+      if (state.viewMode === 'customer') {
+        root.innerHTML = getCustomerHTML();
+        renderSpiceLevels();
+        INGREDIENT_CATEGORIES.forEach(cat => cat.items.forEach(item => updateIngredientItemUI(item.id)));
+        updateCartUI();
+      } else if (state.viewMode === 'chef') {
+        root.innerHTML = `<div id="chef-root"></div>`;
+        renderChefView();
+      } else if (state.viewMode === 'submitted') {
+        root.innerHTML = getSubmittedHTML();
+      }
+    }
+
+    function getCustomerHTML() {
+      let ingredientsHTML = INGREDIENT_CATEGORIES.map(category => `
+        <div class="space-y-4">
+          <h3 class="text-md font-bold text-gray-700 flex items-center gap-2 pb-2 border-b">
+            ${category.icon}
+            ${category.name}
+          </h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            ${category.items.map(item => `
+              <div id="item-card-${item.id}" class="flex items-center justify-between p-3 rounded-xl border border-gray-200 hover:border-red-200 transition-all">
+                <div>
+                  <div class="font-medium text-gray-800 text-sm">${item.name}</div>
+                  <div class="text-xs text-gray-500">${item.price} pts</div>
+                </div>
+                <div id="item-controls-${item.id}"></div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('');
+
+      return `
+        <header class="bg-red-600 text-white shadow-md sticky top-0 z-30">
+          <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <i class="fa-solid fa-kitchen-set text-2xl"></i>
+              <div>
+                <h1 class="text-2xl font-bold tracking-tight">吴氏私厨</h1>
+                <p class="text-red-100 text-sm font-medium">First-timer Malatang</p>
+              </div>
+            </div>
+            <button onclick="app.setView('chef')" class="bg-red-700 hover:bg-red-800 px-4 py-2 rounded-lg text-sm font-semibold shadow-sm transition-colors">
+              Chef Login
+            </button>
+          </div>
+        </header>
+
+        <main class="max-w-6xl mx-auto px-4 py-6">
+          <form onsubmit="app.submitOrder(event)" class="flex flex-col lg:flex-row gap-6">
+            
+            <!-- LEFT COLUMN -->
+            <div class="flex-1 space-y-8">
+              <!-- Name -->
+              <section class="bg-white p-6 rounded-2xl shadow-sm border border-red-100">
+                <h2 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                  <span class="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">1</span>
+                  Who is this order for?
+                </h2>
+                <input type="text" id="customerName" value="${state.customerName}" oninput="app.setName(this.value)" placeholder="Enter your name" class="w-full md:w-1/2 px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none transition-all" required/>
+              </section>
+
+              <!-- Spice -->
+              <section class="bg-white p-6 rounded-2xl shadow-sm border border-red-100">
+                <h2 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                  <span class="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">2</span>
+                  Choose your Broth & Spice
+                </h2>
+                <div id="spice-container" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
+              </section>
+
+              <!-- Ingredients -->
+              <section class="bg-white p-6 rounded-2xl shadow-sm border border-red-100 space-y-8">
+                <h2 class="text-lg font-bold text-gray-800 flex items-center gap-2 mb-2">
+                  <span class="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">3</span>
+                  Pick your Ingredients
+                </h2>
+                ${ingredientsHTML}
+              </section>
+
+              <!-- Notes -->
+              <section class="bg-white p-6 rounded-2xl shadow-sm border border-red-100">
+                <h2 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                  <span class="bg-red-100 text-red-600 w-6 h-6 rounded-full flex items-center justify-center text-sm">4</span>
+                  Extra Cravings?
+                </h2>
+                <p class="text-sm text-gray-500 mb-3">Want an ingredient not listed above? Let us know!</p>
+                <textarea oninput="app.setNotes(this.value)" placeholder="e.g. Quail eggs, Cilantro on the side..." rows="3" class="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none transition-all resize-none">${state.customNotes}</textarea>
+              </section>
+            </div>
+
+            <!-- RIGHT COLUMN (CART) -->
+            <div class="w-full lg:w-80">
+              <div class="bg-white rounded-2xl shadow-lg border border-gray-100 lg:sticky lg:top-24 overflow-hidden flex flex-col max-h-[80vh]">
+                <div class="bg-gray-50 p-4 border-b border-gray-100 flex items-center justify-between">
+                  <h3 class="font-bold text-gray-800 flex items-center gap-2">
+                    <i class="fa-solid fa-cart-shopping text-red-600"></i> Your Bowl
+                  </h3>
+                  <span id="cart-badge" class="bg-red-100 text-red-800 text-xs font-bold px-2 py-1 rounded-full">0 items</span>
+                </div>
+                
+                <div id="cart-contents" class="p-4 flex-1 overflow-y-auto min-h-[150px]"></div>
+
+                <div class="p-4 bg-gray-50 border-t border-gray-100 space-y-4">
+                  <div class="flex justify-between items-center font-bold text-lg text-gray-800">
+                    <span>Total</span>
+                    <span id="cart-total">0 pts</span>
+                  </div>
+                  
+                  <button id="submit-btn" type="submit" disabled class="w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-none bg-gray-300 text-gray-500 cursor-not-allowed">
+                    <i class="fa-solid fa-bowl-food"></i> Submit Order
+                  </button>
+                  <p id="submit-warning" class="text-xs text-red-500 text-center font-medium hidden">Please enter your name to order</p>
+                </div>
+              </div>
+            </div>
+          </form>
+        </main>
+      `;
+    }
+
+    // Dynamic Updates (to preserve input focus)
+    function renderSpiceLevels() {
+      const container = document.getElementById('spice-container');
+      if (!container) return;
+
+      container.innerHTML = SPICE_LEVELS.map(level => {
+        const isSelected = state.spiceLevel === level.id;
+        const borderClass = isSelected ? 'border-red-500 bg-red-50 shadow-md' : 'border-gray-200 hover:border-red-200 hover:bg-gray-50';
+        
+        let icons = '';
+        if (level.level === 0) {
+          icons = '<i class="fa-solid fa-bowl-food text-amber-600"></i>';
+        } else {
+          icons = Array(level.level).fill('<i class="fa-solid fa-fire text-red-500"></i>').join(' ');
+        }
+
+        return `
+          <label class="cursor-pointer border-2 rounded-xl p-4 flex flex-col items-center justify-center text-center gap-2 transition-all ${borderClass}">
+            <input type="radio" name="spice" value="${level.id}" onchange="app.setSpice('${level.id}')" ${isSelected ? 'checked' : ''} class="hidden"/>
+            <div class="flex justify-center h-6 gap-1">${icons}</div>
+            <div>
+              <div class="font-semibold text-gray-800 text-sm">${level.name}</div>
+              <div class="text-xs text-gray-500 mt-1">${level.chinese}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+    }
+
+    function updateIngredientItemUI(itemId) {
+      const card = document.getElementById(`item-card-${itemId}`);
+      const controls = document.getElementById(`item-controls-${itemId}`);
+      if (!card || !controls) return;
+
+      const qty = state.cart[itemId]?.quantity || 0;
+
+      if (qty > 0) {
+        card.classList.add('border-red-400', 'bg-red-50/30');
+        card.classList.remove('border-gray-200');
+        controls.innerHTML = `
+          <div class="flex items-center gap-3 bg-white border border-red-200 rounded-full px-2 py-1 shadow-sm">
+            <button type="button" onclick="app.removeItem('${itemId}')" class="w-6 h-6 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center hover:bg-gray-200 transition-colors">
+              <i class="fa-solid fa-minus text-[10px]"></i>
+            </button>
+            <span class="font-bold text-sm w-4 text-center">${qty}</span>
+            <button type="button" onclick="app.addItem('${itemId}')" class="w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center hover:bg-red-600 transition-colors">
+              <i class="fa-solid fa-plus text-[10px]"></i>
+            </button>
+          </div>
+        `;
+      } else {
+        card.classList.remove('border-red-400', 'bg-red-50/30');
+        card.classList.add('border-gray-200');
+        controls.innerHTML = `
+          <button type="button" onclick="app.addItem('${itemId}')" class="w-8 h-8 rounded-full bg-red-100 text-red-600 flex items-center justify-center hover:bg-red-200 transition-colors">
+            <i class="fa-solid fa-plus text-xs"></i>
+          </button>
+        `;
+      }
+    }
+
+    function updateCartUI() {
+      const contents = document.getElementById('cart-contents');
+      const badge = document.getElementById('cart-badge');
+      const totalEl = document.getElementById('cart-total');
+      const btn = document.getElementById('submit-btn');
+      const warning = document.getElementById('submit-warning');
+      if (!contents) return;
+
+      const items = Object.values(state.cart);
+      const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
+      const totalPts = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+      badge.innerText = `${totalItems} items`;
+      totalEl.innerText = `${totalPts} pts`;
+
+      if (totalItems === 0) {
+        contents.innerHTML = `
+          <div class="h-full flex flex-col items-center justify-center text-gray-400 space-y-2 py-8">
+            <i class="fa-solid fa-utensils text-4xl opacity-20"></i>
+            <p class="text-sm">Your bowl is empty</p>
+            <p class="text-xs text-center px-4">Select some delicious ingredients to get started!</p>
+          </div>
+        `;
+      } else {
+        contents.innerHTML = `
+          <ul class="space-y-3">
+            ${items.map(item => `
+              <li class="flex justify-between items-start text-sm">
+                <div class="flex gap-2">
+                  <span class="font-semibold text-gray-800">${item.quantity}x</span>
+                  <span class="text-gray-600 line-clamp-1">${item.name.split(' (')[0]}</span>
+                </div>
+                <span class="text-gray-800">${item.price * item.quantity} pts</span>
+              </li>
+            `).join('')}
+          </ul>
+        `;
+      }
+
+      // Button State
+      const hasName = state.customerName.trim().length > 0;
+      if (totalItems > 0 && hasName) {
+        btn.disabled = false;
+        btn.className = "w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-md bg-red-600 text-white hover:bg-red-700 hover:shadow-lg";
+        warning.classList.add('hidden');
+      } else {
+        btn.disabled = true;
+        btn.className = "w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all shadow-none bg-gray-300 text-gray-500 cursor-not-allowed";
+        if (totalItems > 0 && !hasName) {
+          warning.classList.remove('hidden');
+        } else {
+          warning.classList.add('hidden');
+        }
+      }
+    }
+
+    // --- CHEF VIEW ---
+    function renderChefView() {
+      const root = document.getElementById('chef-root');
+      if (!root) return;
+
+      // Calculate compiled ingredients
+      const counts = {};
+      state.orders.forEach(order => {
+        order.items.forEach(item => {
+          if (!counts[item.id]) counts[item.id] = { name: item.name, quantity: 0 };
+          counts[item.id].quantity += item.quantity;
+        });
+      });
+      const compiledIngredients = Object.values(counts).sort((a, b) => b.quantity - a.quantity);
+
+      root.innerHTML = `
+        <div class="min-h-screen bg-gray-50 pb-10">
+          <header class="bg-gray-800 text-white shadow-md sticky top-0 z-30">
+            <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <i class="fa-solid fa-clipboard-list text-2xl"></i>
+                <div>
+                  <h1 class="text-2xl font-bold tracking-tight">Chef's Dashboard</h1>
+                  <p class="text-gray-300 text-sm font-medium">Order Management & Prep</p>
+                </div>
+              </div>
+              <button onclick="app.setView('customer')" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
+                Back to Ordering
+              </button>
+            </div>
+          </header>
+
+          <main class="max-w-6xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Left Column: Aggregated Ingredients -->
+            <div class="lg:col-span-1 space-y-4">
+              <div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
+                <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                  <i class="fa-solid fa-chart-bar text-blue-600"></i> Ingredient Prep List
+                </h2>
+                ${compiledIngredients.length === 0 
+                  ? `<p class="text-gray-500 text-sm italic">No active orders.</p>`
+                  : `<ul class="space-y-3">
+                      ${compiledIngredients.map(ing => `
+                        <li class="flex justify-between items-center p-2 hover:bg-gray-50 rounded-lg border-b border-gray-100 last:border-0">
+                          <span class="font-medium text-gray-700">${ing.name}</span>
+                          <span class="bg-blue-100 text-blue-800 font-bold px-3 py-1 rounded-full text-sm">${ing.quantity}</span>
+                        </li>
+                      `).join('')}
+                    </ul>`
+                }
+              </div>
+            </div>
+
+            <!-- Right Column: Order List -->
+            <div class="lg:col-span-2 space-y-4">
+              <div class="flex items-center justify-between">
+                <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+                  <i class="fa-solid fa-user text-green-600"></i> Recent Orders (${state.orders.length})
+                </h2>
+                ${state.orders.length > 0 ? `
+                  <button onclick="app.clearAllOrders()" class="text-red-500 hover:text-red-700 text-sm font-semibold">
+                    Clear All Orders
+                  </button>
+                ` : ''}
+              </div>
+              
+              ${state.orders.length === 0 
+                ? `<div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 text-center text-gray-500">Waiting for new orders...</div>`
+                : `<div class="grid gap-4">
+                    ${state.orders.map(order => `
+                      <div class="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
+                        <div class="flex justify-between items-start mb-4 border-b pb-4">
+                          <div>
+                            <h3 class="text-lg font-bold text-gray-800">Order for: ${order.customerName}</h3>
+                            <p class="text-xs text-gray-500">${order.time}</p>
+                          </div>
+                          <div class="flex items-center gap-3">
+                            <span class="bg-red-100 text-red-800 text-xs font-bold px-3 py-1 rounded-full">${order.spiceLevel}</span>
+                            <button onclick="app.deleteOrder('${order.docId}')" class="text-gray-400 hover:text-red-600 transition-colors bg-gray-50 hover:bg-red-50 p-1.5 rounded-lg" title="Delete Order">
+                              <i class="fa-solid fa-trash"></i>
+                            </button>
+                          </div>
+                        </div>
+                        <div class="flex flex-wrap gap-2 mb-4">
+                          ${order.items.map(item => `
+                            <span class="bg-gray-100 text-gray-700 text-sm px-2 py-1 rounded-md border border-gray-200">
+                              ${item.quantity}x ${item.name.split(' (')[0]}
+                            </span>
+                          `).join('')}
+                        </div>
+                        ${order.customNotes ? `
+                          <div class="bg-yellow-50 text-yellow-800 p-3 rounded-lg text-sm border border-yellow-200">
+                            <strong>Notes:</strong> ${order.customNotes}
+                          </div>
+                        ` : ''}
+                      </div>
+                    `).join('')}
+                  </div>`
+              }
+            </div>
+          </main>
+        </div>
+      `;
+    }
+
+    // --- SUBMITTED VIEW ---
+    function getSubmittedHTML() {
+      const items = Object.values(state.cart);
+      const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
+      const totalPts = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+      const spiceName = SPICE_LEVELS.find(s => s.id === state.spiceLevel)?.name;
+
+      return `
+        <div class="min-h-screen bg-orange-50 flex items-center justify-center p-4">
+          <div class="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full text-center space-y-6">
+            <div class="flex justify-center">
+              <div class="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center">
+                <i class="fa-solid fa-circle-check text-4xl text-green-600"></i>
+              </div>
+            </div>
+            <div>
+              <h2 class="text-2xl font-bold text-gray-800">Order Received!</h2>
+              <p class="text-gray-600 mt-2">Thank you, ${state.customerName}. Your Malatang is being prepared.</p>
+            </div>
+            
+            <div class="bg-gray-50 p-4 rounded-xl text-left text-sm space-y-2 border border-gray-100">
+              <div class="flex justify-between font-semibold border-b pb-2">
+                <span>Total Items: ${totalItems}</span>
+                <span>${totalPts} pts</span>
+              </div>
+              <p class="text-gray-600"><span class="font-medium text-gray-700">Spice:</span> ${spiceName}</p>
+              ${state.customNotes ? `<p class="text-gray-600"><span class="font-medium text-gray-700">Notes:</span> ${state.customNotes}</p>` : ''}
+            </div>
+
+            <button onclick="app.resetOrder()" class="w-full bg-red-600 text-white font-semibold py-3 rounded-xl hover:bg-red-700 transition-colors shadow-md hover:shadow-lg">
+              Start New Order
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Initialize application
+    initFirebase();
+    render();
+
+  </script>
+</body>
+</html>
